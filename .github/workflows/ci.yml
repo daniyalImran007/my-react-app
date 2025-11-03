@@ -20,7 +20,7 @@ jobs:  # Units of work; can run in parallel
           node-version: '20'  # Specify version for consistency
 
       - name: Install dependencies  # Step 3: npm install
-        run: npm ci  # Faster than npm install for CI
+        run: npm install  # Faster than npm install for CI
 
       - name: Run lint  # Step 4: Linting (assuming ESLint)
         run: npm run lint  # Add this script to package.json if needed: "lint": "eslint src/"
