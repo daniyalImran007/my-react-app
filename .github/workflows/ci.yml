@@ -57,7 +57,7 @@ jobs:  # Units of work; can run in parallel
 
       # --- 4. Install Dependencies ---
       - name: Install dependencies
-        run: npm ci
+        run: npm Install
 
       # --- 5. Lint Code ---
       - name: Run ESLint
