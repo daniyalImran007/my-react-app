@@ -5,23 +5,23 @@ on:  # Triggers: Events that start the pipeline
     branches: [ main ]
   pull_request:  # On PR to main
     branches: [ main ]
-    workflow_dispatch:
+  workflow_dispatch:
 
     # === CONCURRENCY: Prevent overlapping runs on same branch/PR ===
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}
-      cancel-in-progress: true
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
-    # === PERMISSIONS (Security best practice) ===
-    permissions:
-      contents: read
-      actions: read
-      security-events: write  # Required for CodeQL
-      statuses: write         # For commit status
+# === PERMISSIONS (Security best practice) ===
+permissions:
+  contents: read
+  actions: read
+  security-events: write  # Required for CodeQL
+  statuses: write         # For commit status
 
 jobs:  # Units of work; can run in parallel
   build-and-test: # job name
-    name: Build & Test (Node ${{ matrix.node }})
+    name: Build & Test (Node ${{ matrix.node-version }})
     runs-on: ubuntu-latest
 
     # === MATRIX STRATEGY: Test across multiple Node.js versions ===
