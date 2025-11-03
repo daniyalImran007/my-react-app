@@ -19,6 +19,13 @@ jobs:  # Units of work; can run in parallel
         with:
           node-version: '20'  # Specify version for consistency
 
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm  # Or node_modules for React
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}  # Cache key based on lockfile
+          restore-keys: ${{ runner.os }}-npm-
+
       - name: Install dependencies  # Step 3: npm install
         run: npm install  # Faster than npm install for CI
 
