@@ -1,26 +1,27 @@
-name: CI Pipeline  # Name of the workflow
+name: CI Pipeline
 
-on:  # Triggers: Events that start the pipeline
-  push:  # On push to any branch
+# === TRIGGERS ===
+on:
+  push:
     branches: [ main ]
-  pull_request:  # On PR to main
+  pull_request:
     branches: [ main ]
-    workflow_dispatch:
+  workflow_dispatch:  # Manual trigger from GitHub UI
 
-    # === CONCURRENCY: Prevent overlapping runs on same branch/PR ===
-    concurrency:
-      group: ${{ github.workflow }}-${{ github.ref }}
-      cancel-in-progress: true
+# === CONCURRENCY: Prevent overlapping runs on same branch/PR ===
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
-    # === PERMISSIONS (Security best practice) ===
-    permissions:
-      contents: read
-      actions: read
-      security-events: write  # Required for CodeQL
-      statuses: write         # For commit status
+# === PERMISSIONS (Security best practice) ===
+permissions:
+  contents: read
+  actions: read
+  security-events: write  # Required for CodeQL
+  statuses: write         # For commit status
 
-jobs:  # Units of work; can run in parallel
-  build-and-test: # job name
+jobs:
+  build-and-test:
     name: Build & Test (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
 
@@ -30,7 +31,7 @@ jobs:  # Units of work; can run in parallel
         node-version: [18.x, 20.x, 22.x]
       fail-fast: false  # Continue even if one fails
 
-    steps:  # Sequence of tasks
+    steps:
       # --- 1. Checkout Code ---
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -103,19 +104,19 @@ jobs:  # Units of work; can run in parallel
         uses: github/codeql-action/analyze@v3
 
   # === NOTIFICATIONS: Slack on Failure ===
-  # notify:
-  #   needs: [build-and-test, codeql]
-  #   runs-on: ubuntu-latest
-  #   if: failure() && github.ref == 'refs/heads/main'
-  #   steps:
-  #     - name: Send Slack Notification
-  #       uses: slackapi/slack-github-action@v1.26.0
-  #       with:
-  #         payload: |
-  #           {
-  #             "text": ":fire: *CI Pipeline Failed!* `${{ github.workflow }}` on `${{ github.ref_name }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Run>",
-  #             "channel": "#ci-alerts"
-  #           }
-  #       env:
-  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-  #         SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
+  notify:
+    needs: [build-and-test, codeql]
+    runs-on: ubuntu-latest
+    if: failure() && github.ref == 'refs/heads/main'
+    steps:
+      - name: Send Slack Notification
+        uses: slackapi/slack-github-action@v1.26.0
+        with:
+          payload: |
+            {
+              "text": ":fire: *CI Pipeline Failed!* `${{ github.workflow }}` on `${{ github.ref_name }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Workflow Run>",
+              "channel": "#ci-alerts"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK
