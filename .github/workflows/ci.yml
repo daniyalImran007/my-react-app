@@ -1,0 +1,32 @@
+name: CI Pipeline  # Name of the workflow
+
+on:  # Triggers: Events that start the pipeline
+  push:  # On push to any branch
+    branches: [ main ]
+  pull_request:  # On PR to main
+    branches: [ main ]
+
+jobs:  # Units of work; can run in parallel
+  build:  # Job name
+    runs-on: ubuntu-latest  # Runner environment (GitHub-hosted VM)
+
+    steps:  # Sequence of tasks
+      - name: Checkout code  # Step 1: Get the code
+        uses: actions/checkout@v4  # Reusable action from marketplace
+
+      - name: Set up Node.js  # Step 2: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'  # Specify version for consistency
+
+      - name: Install dependencies  # Step 3: npm install
+        run: npm ci  # Faster than npm install for CI
+
+      - name: Run lint  # Step 4: Linting (assuming ESLint)
+        run: npm run lint  # Add this script to package.json if needed: "lint": "eslint src/"
+
+      - name: Run tests  # Step 5: Tests
+        run: npm test -- --passWithNoTests  # Allows if no tests, but we have one
+
+      - name: Build app  # Step 6: Build for production
+        run: npm run build
