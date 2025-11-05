@@ -150,10 +150,23 @@ jobs:
 
       - name: Smoke test
         run: |
-          URL="${{ steps.vercel.outputs.url }}"
-          echo "Testing $URL"
-          sleep 12
-          curl -f -L "$URL" || exit 1
+          # Try preview-url first (PRs), then url (prod), then fallback to project domain
+          URL="${{ steps.vercel.outputs.preview-url || steps.vercel.outputs.url }}"
+          
+          # Fallback: if still empty, use Vercel's default project URL
+          if [ -z "$URL" ]; then
+            PROJECT_NAME=$(echo "${{ secrets.VERCEL_PROJECT_ID }}" | cut -c1-8)
+            URL="https://${{ secrets.VERCEL_PROJECT_ID }}.vercel.app"
+            echo "Warning: No URL from Vercel action. Falling back to: $URL"
+          fi
+
+          echo "Testing: $URL"
+          sleep 15  # Give Vercel time to propagate
+
+          # Follow redirects (-L), fail on HTTP error (-f), timeout after 30s
+          curl -f -L --max-time 30 "$URL" || exit 1
+        env:
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
 
       # - name: Slack – prod success
       #   uses: slackapi/slack-github-action@v1.26.0
