@@ -5,7 +5,7 @@ name: CI/CD Pipeline (Vercel)
 # ──────────────────────────────────────
 on:
   push:
-    branches: [ main ]
+    branches: [ main, staging, dev ]   # Added staging, dev
   pull_request:
     types: [ opened, synchronize, reopened ]
   workflow_dispatch:          # manual run from UI
@@ -160,13 +160,23 @@ jobs:
         uses: github/codeql-action/analyze@v3
 
   # -------------------------------------------------
-  # 3. CD – Production (only on main + CI success)
+  # 3. CD – Production (now handles dev, staging, main)
   # -------------------------------------------------
   deploy-prod:
     needs: [ci, codeql]
-    if: needs.ci.outputs.deploy-prod == 'true'
+    if: >-
+      ${{ 
+        github.ref == 'refs/heads/main' || 
+        github.ref == 'refs/heads/staging' || 
+        github.ref == 'refs/heads/dev'
+      }}
     runs-on: ubuntu-latest
-    environment: production
+    environment: >-
+      ${{ 
+        github.ref == 'refs/heads/main' && 'production' ||
+        github.ref == 'refs/heads/staging' && 'staging' ||
+        'development'
+      }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -177,17 +187,29 @@ jobs:
           name: react-build-node-20.x
           path: build/
 
-      - name: Deploy to Vercel (prod)
+      - name: Deploy to Vercel
         id: vercel
         uses: amondnet/vercel-action@v25
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }}
           vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
           vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          vercel-args: '--prod'  # Only on main
+          vercel-args: >-
+            ${{ github.ref == 'refs/heads/main' && '--prod' || '--prebuilt' }}
+          alias-domains: >-
+            ${{ 
+              github.ref == 'refs/heads/main' && 'my-react-app111-phi.vercel.app' ||
+              github.ref == 'refs/heads/staging' && 'staging-my-react-app111.vercel.app' ||
+              'dev-my-react-app111.vercel.app'
+            }}
           working-directory: .
         env:
-          VERCEL_ENV: production
+          VERCEL_ENV: >-
+            ${{ 
+              github.ref == 'refs/heads/main' && 'production' ||
+              github.ref == 'refs/heads/staging' && 'staging' ||
+              'development'
+            }}
 
       # FIXED: Debug what Vercel actually returns
       - name: Debug Vercel Outputs
@@ -196,19 +218,22 @@ jobs:
           echo "url: ${{ steps.vercel.outputs.url }}"
           echo "deployment-id: ${{ steps.vercel.outputs.deployment-id }}"
 
-      # FIXED: Use fallback production domain
+      # FIXED: Use fallback production domain per branch
       - name: Smoke test (Production)
         run: |
-          URL="${{ steps.vercel.outputs.url }}"
+          URL="${{ steps.vercel.outputs.url || steps.vercel.outputs.preview-url }}"
           
-          # If Vercel doesn't return a URL, use your real production domain
+          # Fallback per branch
           if [ -z "$URL" ]; then
-            # CHANGE THIS TO YOUR ACTUAL PRODUCTION DOMAIN
-            URL="https://my-react-app111-phi.vercel.app/"
+            case "${{ github.ref }}" in
+              "refs/heads/main")      URL="https://my-react-app111-phi.vercel.app" ;;
+              "refs/heads/staging")   URL="https://staging-my-react-app111.vercel.app" ;;
+              "refs/heads/dev")       URL="https://dev-my-react-app111.vercel.app" ;;
+            esac
             echo "Warning: No URL from Vercel. Using fallback: $URL"
           fi
           
-          echo "Testing production: $URL"
+          echo "Testing: $URL"
           sleep 15
           curl -f -L --max-time 30 "$URL" || exit 1
 
