@@ -1,7 +1,7 @@
 name: CI/CD Pipeline (Vercel)
 
 # ──────────────────────────────────────
-<dependency> TRIGGERS
+# TRIGGERS
 # ──────────────────────────────────────
 on:
   push:
