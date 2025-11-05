@@ -1,94 +1,112 @@
 name: CI/CD Pipeline (Vercel)
 
-# === TRIGGERS ===
+# ──────────────────────────────────────
+# TRIGGERS
+# ──────────────────────────────────────
 on:
   push:
     branches: [ main ]
   pull_request:
     types: [ opened, synchronize, reopened ]
-  workflow_dispatch:  # Manual runs
+  workflow_dispatch:          # manual run from UI
 
-# === CONCURRENCY ===
+# ──────────────────────────────────────
+# CONCURRENCY – cancel old runs
+# ──────────────────────────────────────
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# === PERMISSIONS ===
+# ──────────────────────────────────────
+# PERMISSIONS (least-privilege)
+# ──────────────────────────────────────
 permissions:
   contents: read
   actions: read
-  security-events: write
-  statuses: write
-  deployments: write
-  pull-requests: write
+  security-events: write   # CodeQL
+  statuses: write          # commit status
+  deployments: write       # Vercel
+  pull-requests: write     # PR comment
 
+# ──────────────────────────────────────
+# JOBS
+# ──────────────────────────────────────
 jobs:
-  # === CI: Build, Test, Security ===
+  # -------------------------------------------------
+  # 1. CI – build, test, lint, upload artifact
+  # -------------------------------------------------
   ci:
-    name: CI (Node ${{ matrix.node }})
+    name: CI – Node ${{ matrix.node }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18.x, 20.x, 22.x]
+        node: [18.x, 20.x, 22.x]
       fail-fast: false
-
+    outputs:
+      # expose a flag for CD (true only on main + success)
+      deploy-prod: ${{ steps.set-deploy.outputs.deploy-prod }}
     steps:
-      - name: Checkout Repository
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js ${{ matrix.node-version }}
+      - name: Setup Node ${{ matrix.node }}
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version: ${{ matrix.node }}
 
-      - name: Cache npm dependencies
+      - name: Cache npm
         uses: actions/cache@v4
-        id: npm-cache
+        id: cache
         with:
           path: |
             ~/.npm
             node_modules
           key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-npm-
+          restore-keys: ${{ runner.os }}-npm-
 
-      - name: Install dependencies
+      - name: Install
         run: npm ci
 
-      - name: Run ESLint
+      - name: Lint
         run: npm run lint
 
-      - name: Run Tests
+      - name: Test
         run: npm test -- --coverage --watchAll=false
 
-      - name: Build React App
+      - name: Build
         run: npm run build
 
-      - name: Upload Build Artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: react-build-node-${{ matrix.node-version }}
+          name: react-build-node-${{ matrix.node }}
           path: build/
           retention-days: 7
 
-    # === OUTPUT: Pass success to CD ===
-    outputs:
-      should-deploy: ${{ success() && github.ref == 'refs/heads/main' }}
+      # ---- set output flag for CD (main + success) ----
+      - name: Set deploy-prod flag
+        id: set-deploy
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" && "${{ job.status }}" == "success" ]]; then
+            echo "deploy-prod=true" >> $GITHUB_OUTPUT
+          else
+            echo "deploy-prod=false" >> $GITHUB_OUTPUT
+          fi
 
-  # === SECURITY: CodeQL ===
-  security:
+  # -------------------------------------------------
+  # 2. SECURITY – CodeQL (always runs, even if CI fails)
+  # -------------------------------------------------
+  codeql:
     needs: ci
     runs-on: ubuntu-latest
-    if: always()  # Run even if CI fails (for alerts)
     permissions:
       security-events: write
       actions: read
       contents: read
-
     steps:
-      - name: Checkout Code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Initialize CodeQL
@@ -97,29 +115,29 @@ jobs:
           languages: javascript-typescript
           queries: security-and-quality
 
-      - name: Perform CodeQL Analysis
+      - name: Analyze
         uses: github/codeql-action/analyze@v3
 
-  # === CD: Deploy (Only on main success) ===
-  cd:
-    needs: [ci, security]  # Wait for CI + Security
-    if: needs.ci.outputs.should-deploy  # Only deploy on main success
+  # -------------------------------------------------
+  # 3. CD – Production (only on main + CI success)
+  # -------------------------------------------------
+  deploy-prod:
+    needs: [ci, codeql]
+    if: needs.ci.outputs.deploy-prod == 'true'
     runs-on: ubuntu-latest
-    environment: production  # Approval gate
-
+    environment: production          # approval gate
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # === DOWNLOAD ARTIFACT: From SAME RUN (Node 20.x) ===
-      - name: Download Build Artifact
+      - name: Download artifact (Node 20.x)
         uses: actions/download-artifact@v4
         with:
-          name: react-build-node-20.x  # Matches CI upload
+          name: react-build-node-20.x
           path: build/
 
-      - name: Deploy to Vercel
-        id: vercel_deploy
+      - name: Deploy to Vercel (prod)
+        id: vercel
         uses: amondnet/vercel-action@v25
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }}
@@ -130,96 +148,82 @@ jobs:
         env:
           VERCEL_ENV: production
 
-      - name: Get Deployment URL
+      - name: Smoke test
         run: |
-          echo "Production URL: ${{ steps.vercel_deploy.outputs.url }}"
-
-      - name: Smoke Test Deployed App
-        run: |
-          URL="${{ steps.vercel_deploy.outputs.url }}"
-          echo "Testing: $URL"
-          sleep 10
+          URL="${{ steps.vercel.outputs.url }}"
+          echo "Testing $URL"
+          sleep 12
           curl -f -L "$URL" || exit 1
 
-      # - name: Notify Slack on Success
-      #   if: success()
+      # - name: Slack – prod success
       #   uses: slackapi/slack-github-action@v1.26.0
       #   with:
       #     payload: |
-      #       {
-      #         "text": ":rocket: *Production Deployed!* 🚀\n<${{ steps.vercel_deploy.outputs.url }}|View Live> | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Workflow Run>",
-      #         "channel": "#deployments"
-      #       }
+      #       { "text": "Production deployed!\n<${{ steps.vercel.outputs.url }}|View Live> | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Run>" }
       #   env:
       #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
-  # === PREVIEW DEPLOY: For PRs ===
-  preview:
+  # -------------------------------------------------
+  # 4. CD – Preview (PRs only)
+  # -------------------------------------------------
+  deploy-preview:
     needs: ci
     if: github.event_name == 'pull_request' && needs.ci.result == 'success'
     runs-on: ubuntu-latest
     environment: preview
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download Build Artifact
+      - name: Download artifact (Node 20.x)
         uses: actions/download-artifact@v4
         with:
           name: react-build-node-20.x
           path: build/
 
-      - name: Deploy Preview to Vercel
-        id: vercel_deploy
+      - name: Deploy preview
+        id: vercel
         uses: amondnet/vercel-action@v25
         with:
           vercel-token: ${{ secrets.VERCEL_TOKEN }}
           vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
           vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          vercel-args: '--prebuilt'  # Use prebuilt for previews
-          working-directory: .
-          alias-domains: |
-            pr-${{ github.event.pull_request.number }}-${{ github.repository_owner }}.vercel.app
+          vercel-args: '--prebuilt'
+          alias-domains: pr-${{ github.event.pull_request.number }}-${{ github.repository_owner }}.vercel.app
         env:
           VERCEL_ENV: preview
 
-      - name: Comment PR with Preview URL
+      - name: Comment PR with preview URL
         uses: actions/github-script@v7
         with:
           script: |
-            const url = "${{ steps.vercel_deploy.outputs.preview-url }}";
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `🚀 **Preview Deployed!** \n${url}`
+              body: `Preview ready: ${{ steps.vercel.outputs.preview-url }}`
             })
 
-      # - name: Notify Slack on Preview
+      # - name: Slack – preview
       #   uses: slackapi/slack-github-action@v1.26.0
       #   with:
       #     payload: |
-      #       {
-      #         "text": ":eyes: *Preview Deployed for PR #${{ github.event.pull_request.number }}*\n<${{ steps.vercel_deploy.outputs.preview-url }}|View Preview> | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Workflow Run>",
-      #         "channel": "#previews"
-      #       }
+      #       { "text": "Preview for PR #${{ github.event.pull_request.number }}\n<${{ steps.vercel.outputs.preview-url }}|Open> | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Run>" }
       #   env:
       #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
-  # === NOTIFY ON FAILURE ===
+  # -------------------------------------------------
+  # 5. NOTIFY ON ANY FAILURE
+  # -------------------------------------------------
   # notify-failure:
-  #   needs: [ci, cd, preview]
-  #   if: failure() && (github.ref == 'refs/heads/main' || github.event_name == 'pull_request')
+  #   needs: [ci, codeql, deploy-prod, deploy-preview]
+  #   if: failure()
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - name: Send Slack Failure Alert
+  #     - name: Slack – failure
   #       uses: slackapi/slack-github-action@v1.26.0
   #       with:
   #         payload: |
-  #           {
-  #             "text": ":fire: *CI/CD Failed!* On `${{ github.ref_name }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>",
-  #             "channel": "#ci-alerts"
-  #           }
+  #           { "text": ":fire: *CI/CD failed* on `${{ github.ref_name }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>" }
   #       env:
   #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
