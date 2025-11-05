@@ -27,6 +27,7 @@ permissions:
   statuses: write          # commit status
   deployments: write       # Vercel
   pull-requests: write     # PR comment
+  packages: write          # FIXED: For GHCR push
 
 # ──────────────────────────────────────
 # JOBS
