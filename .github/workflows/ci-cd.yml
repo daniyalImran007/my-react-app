@@ -1,7 +1,7 @@
 name: CI/CD Pipeline (Vercel)
 
 # ──────────────────────────────────────
-# TRIGGERS
+<dependency> TRIGGERS
 # ──────────────────────────────────────
 on:
   push:
@@ -44,7 +44,6 @@ jobs:
         node: [18.x, 20.x, 22.x]
       fail-fast: false
     outputs:
-      # expose a flag for CD (true only on main + success)
       deploy-prod: ${{ steps.set-deploy.outputs.deploy-prod }}
     steps:
       - name: Checkout
@@ -126,11 +125,11 @@ jobs:
           cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
           sbom: true  # Optional: Generate SBOM for security
 
-      # ---- set output flag for CD (main + success) ----
+      # ---- set output flag for CD (allow all branches) ----
       - name: Set deploy-prod flag
         id: set-deploy
         run: |
-          if [[ "${{ github.ref }}" == "refs/heads/main" && "${{ job.status }}" == "success" ]]; then
+          if [[ "${{ job.status }}" == "success" ]]; then
             echo "deploy-prod=true" >> $GITHUB_OUTPUT
           else
             echo "deploy-prod=false" >> $GITHUB_OUTPUT
@@ -160,16 +159,11 @@ jobs:
         uses: github/codeql-action/analyze@v3
 
   # -------------------------------------------------
-  # 3. CD – Production (now handles dev, staging, main)
+  # 3. CD – Production (handles dev, staging, main)
   # -------------------------------------------------
   deploy-prod:
     needs: [ci, codeql]
-    if: >-
-      ${{ 
-        github.ref == 'refs/heads/main' || 
-        github.ref == 'refs/heads/staging' || 
-        github.ref == 'refs/heads/dev'
-      }}
+    if: needs.ci.outputs.deploy-prod == 'true'
     runs-on: ubuntu-latest
     environment: >-
       ${{ 
@@ -181,11 +175,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download artifact (Node 20.x)
-        uses: actions/download-artifact@v4
-        with:
-          name: react-build-node-20.x
-          path: build/
+      # REMOVED: Download artifact — Vercel builds from source
 
       - name: Deploy to Vercel
         id: vercel
@@ -195,7 +185,7 @@ jobs:
           vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
           vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
           vercel-args: >-
-            ${{ github.ref == 'refs/heads/main' && '--prod' || '--prebuilt' }}
+            ${{ github.ref == 'refs/heads/main' && '--prod' || '' }}
           alias-domains: >-
             ${{ 
               github.ref == 'refs/heads/main' && 'my-react-app111-phi.vercel.app' ||
@@ -317,6 +307,6 @@ jobs:
   #       uses: slackapi/slack-github-action@v1.26.0
   #       with:
   #         payload: |
-  #           { "text": ":fire: *CI/CD failed* on `${{ github.ref_name }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>" }
+  #           { "text": "CI/CD failed* on `${{ github.ref_name }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>" }
   #       env:
   #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
