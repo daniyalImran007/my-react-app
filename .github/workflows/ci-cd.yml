@@ -1,62 +1,69 @@
+# =====================================================================
+# 🌐 CI/CD PIPELINE FOR REACT/VERCEL + DOCKER + CODEQL (SECURE VERSION)
+# =====================================================================
 name: CI/CD Pipeline (Vercel)
 
 # ──────────────────────────────────────
-# TRIGGERS
+# TRIGGERS – when this workflow runs
 # ──────────────────────────────────────
 on:
   push:
-    branches: [ main ]
+    branches: [ main ]               # 👉 Runs when you push to the main branch
   pull_request:
-    types: [ opened, synchronize, reopened ]
-  workflow_dispatch:          # manual run from UI
+    types: [ opened, synchronize, reopened ]  # 👉 Runs for new/updated/reopened PRs
+  workflow_dispatch:                 # 👉 Allows manual trigger from the GitHub UI
 
 # ──────────────────────────────────────
 # CONCURRENCY – cancel old runs
 # ──────────────────────────────────────
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}  # 👉 Unique concurrency key per workflow + branch
+  cancel-in-progress: true                         # 👉 Cancels older runs for the same branch
 
 # ──────────────────────────────────────
-# PERMISSIONS (least-privilege)
+# PERMISSIONS – least privilege principle
 # ──────────────────────────────────────
 permissions:
-  contents: read
-  actions: read
-  security-events: write   # CodeQL
-  statuses: write          # commit status
-  deployments: write       # Vercel
-  pull-requests: write     # PR comment
-  packages: write          # FIXED: For GHCR push
+  contents: read            # 👉 Read repo content
+  actions: read             # 👉 Read workflow metadata
+  security-events: write    # 👉 Allow CodeQL to upload results
+  statuses: write           # 👉 Update commit statuses
+  deployments: write        # 👉 Deploy to Vercel
+  pull-requests: write      # 👉 Comment on PRs
+  packages: write           # 👉 Push Docker image to GitHub Container Registry (GHCR)
 
 # ──────────────────────────────────────
 # JOBS
 # ──────────────────────────────────────
 jobs:
-  # -------------------------------------------------
-  # 1. CI – build, test, lint, upload artifact
-  # -------------------------------------------------
+
+  # ==============================================================
+  # 1️⃣ CI JOB – build, lint, test, upload artifact, push Docker
+  # ==============================================================
   ci:
     name: CI – Node ${{ matrix.node }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest                # 👉 Use Ubuntu runner
     strategy:
       matrix:
-        node: [18.x, 20.x, 22.x]
-      fail-fast: false
+        node: [18.x, 20.x, 22.x]          # 👉 Test across Node versions
+      fail-fast: false                    # 👉 Don’t stop others if one fails
     outputs:
-      # expose a flag for CD (true only on main + success)
-      deploy-prod: ${{ steps.set-deploy.outputs.deploy-prod }}
+      deploy-prod: ${{ steps.set-deploy.outputs.deploy-prod }}  # 👉 Expose flag for deploy stage
+
     steps:
+      # ---- Checkout the repository ----
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0                  # 👉 Get full history (useful for versioning or Docker tags)
 
+      # ---- Setup Node environment ----
       - name: Setup Node ${{ matrix.node }}
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
 
+      # ---- Cache npm packages ----
       - name: Cache npm
         uses: actions/cache@v4
         id: cache
@@ -67,43 +74,48 @@ jobs:
           key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
           restore-keys: ${{ runner.os }}-npm-
 
-      # FIXED: Use npm ci instead of npm install
+      # ---- Install dependencies ----
       - name: Install
-        run: npm ci
+        run: npm ci                       # 👉 Clean, reproducible install using package-lock.json
 
+      # ---- Lint the code ----
       - name: Lint
         run: npm run lint
 
+      # ---- Run tests ----
       - name: Test
-        run: npm test -- --coverage --watchAll=false
+        run: npm test -- --coverage --watchAll=false  # 👉 Generate coverage, disable watch mode
 
+      # ---- Build the project ----
       - name: Build
-        run: npm run build
+        run: npm run build                # 👉 Produces /build folder for deployment
 
+      # ---- Upload build artifact ----
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: react-build-node-${{ matrix.node }}
-          path: build/
+          path: build/                    # 👉 Save build output for next jobs
           retention-days: 7
 
-      # === NEW: DOCKER BUILD WITH CACHE ===
+      # === 🐳 Docker Build + Push (with caching) ===
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v3   # 👉 Enables advanced Docker builds
 
       - name: Generate Docker metadata (auto-lowercases tags)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository }}
+          images: ghcr.io/${{ github.repository }}   # 👉 Image name on GitHub Container Registry
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            type=sha
+            type=sha                               # 👉 Tags: latest (on main), commit SHA
 
       - name: Cache Docker layers
         uses: actions/cache@v4
         with:
-          path: /tmp/.buildx-cache
+          path: /tmp/.buildx-cache                 # 👉 Directory where buildx stores cached layers
           key: ${{ runner.os }}-buildx-${{ github.sha }}
           restore-keys: |
             ${{ runner.os }}-buildx-
@@ -112,21 +124,21 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ github.actor }}            # 👉 Authenticated user (GitHub Actions)
+          password: ${{ secrets.GITHUB_TOKEN }}    # 👉 Built-in token (no need for personal token)
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6  # Updated to latest v6
+        uses: docker/build-push-action@v6          # 👉 Build + Push Docker image
         with:
           context: .
           file: Dockerfile
-          push: true
+          push: true                               # 👉 Actually push to GHCR
           tags: ${{ steps.meta.outputs.tags }}
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
-          sbom: true  # Optional: Generate SBOM for security
+          sbom: true                               # 👉 Generate Software Bill of Materials (security)
 
-      # ---- set output flag for CD (main + success) ----
+      # ---- Set deploy-prod flag for CD ----
       - name: Set deploy-prod flag
         id: set-deploy
         run: |
@@ -135,12 +147,13 @@ jobs:
           else
             echo "deploy-prod=false" >> $GITHUB_OUTPUT
           fi
+        # 👉 This output tells later jobs whether to trigger production deploy
 
-  # -------------------------------------------------
-  # 2. SECURITY – CodeQL (always runs, even if CI fails)
-  # -------------------------------------------------
+  # ==============================================================
+  # 2️⃣ SECURITY JOB – CodeQL analysis
+  # ==============================================================
   codeql:
-    needs: ci
+    needs: ci                                 # 👉 Waits for CI to complete
     runs-on: ubuntu-latest
     permissions:
       security-events: write
@@ -153,20 +166,24 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
-          languages: javascript-typescript
-          queries: security-and-quality
+          languages: javascript-typescript     # 👉 Analyze JS/TS code
+          queries: security-and-quality        # 👉 Use default security & quality rules
 
       - name: Analyze
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v3  # 👉 Uploads scan results to GitHub Security tab
 
-  # -------------------------------------------------
-  # 3. CD – Production (only on main + CI success)
-  # -------------------------------------------------
+    # 💡 Optional improvement:
+    # Add `if: always()` if you want this to run even when CI fails.
+
+  # ==============================================================
+  # 3️⃣ CD JOB – Deploy to Production (main branch only)
+  # ==============================================================
   deploy-prod:
-    needs: [ci, codeql]
-    if: needs.ci.outputs.deploy-prod == 'true'
+    needs: [ci, codeql]                         # 👉 Wait for CI + CodeQL
+    if: needs.ci.outputs.deploy-prod == 'true'  # 👉 Run only if CI success + main branch
     runs-on: ubuntu-latest
     environment: production
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -174,7 +191,7 @@ jobs:
       - name: Download artifact (Node 20.x)
         uses: actions/download-artifact@v4
         with:
-          name: react-build-node-20.x
+          name: react-build-node-20.x            # 👉 Pick Node 20 build for production
           path: build/
 
       - name: Deploy to Vercel (prod)
@@ -184,50 +201,49 @@ jobs:
           vercel-token: ${{ secrets.VERCEL_TOKEN }}
           vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
           vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          vercel-args: '--prod'  # Only on main
+          vercel-args: '--prod'                  # 👉 Deploy to production environment
           working-directory: .
         env:
           VERCEL_ENV: production
 
-      # FIXED: Debug what Vercel actually returns
       - name: Debug Vercel Outputs
         run: |
           echo "preview-url: ${{ steps.vercel.outputs.preview-url }}"
           echo "url: ${{ steps.vercel.outputs.url }}"
           echo "deployment-id: ${{ steps.vercel.outputs.deployment-id }}"
+        # 👉 Prints Vercel metadata for troubleshooting
 
-      # FIXED: Use fallback production domain
       - name: Smoke test (Production)
         run: |
           URL="${{ steps.vercel.outputs.url }}"
           
-          # If Vercel doesn't return a URL, use your real production domain
+          # 👉 Fallback if no URL is returned by Vercel
           if [ -z "$URL" ]; then
-            # CHANGE THIS TO YOUR ACTUAL PRODUCTION DOMAIN
             URL="https://my-react-app111-phi.vercel.app/"
             echo "Warning: No URL from Vercel. Using fallback: $URL"
           fi
           
           echo "Testing production: $URL"
-          sleep 15
-          curl -f -L --max-time 30 "$URL" || exit 1
+          sleep 15                              # 👉 Wait for deployment to propagate
+          curl -f -L --max-time 30 "$URL" || exit 1  # 👉 Fail if site not reachable
 
-      # - name: Slack – prod success
+      # - name: Slack – prod success (optional)
       #   uses: slackapi/slack-github-action@v1.26.0
       #   with:
       #     payload: |
-      #       { "text": "Production deployed!\n<${{ steps.vercel.outputs.url }}|View Live> | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Run>" }
+      #       { "text": "✅ Production deployed!\n<${{ steps.vercel.outputs.url }}|View Live>" }
       #   env:
       #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
-  # -------------------------------------------------
-  # 4. CD – Preview (PRs only)
-  # -------------------------------------------------
+  # ==============================================================
+  # 4️⃣ CD JOB – Deploy Preview for Pull Requests
+  # ==============================================================
   deploy-preview:
     needs: ci
     if: github.event_name == 'pull_request' && needs.ci.result == 'success'
     runs-on: ubuntu-latest
     environment: preview
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -235,7 +251,7 @@ jobs:
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: react-build-node-20.x
+          name: react-build-node-20.x            # 👉 Reuse Node 20 build for preview
           path: build/
 
       - name: Deploy Preview
@@ -245,7 +261,7 @@ jobs:
           vercel-token: ${{ secrets.VERCEL_TOKEN }}
           vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
           vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          vercel-args: '--prebuilt'  # Safe for preview domains
+          vercel-args: '--prebuilt'              # 👉 Use prebuilt artifact
           alias-domains: pr-${{ github.event.pull_request.number }}.vercel.app
         env:
           VERCEL_ENV: preview
@@ -259,9 +275,9 @@ jobs:
           fi
           echo "Testing preview: $URL"
           sleep 15
-          curl -f -L --max-time 30 "$URL" || exit 1
+          curl -f -L --max-time 30 "$URL" || exit 1  # 👉 Fail if preview not reachable
 
-      - name: Comment PR
+      - name: Comment PR with Preview URL
         uses: actions/github-script@v7
         with:
           script: |
@@ -269,26 +285,27 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `Preview ready: ${{ steps.vercel.outputs.preview-url }}`
+              body: `🚀 Preview ready: ${{ steps.vercel.outputs.preview-url }}`
             })
+        # 👉 Adds a comment to the PR with the live preview link
 
-      # - name: Slack – preview
+      # - name: Slack – preview notification (optional)
       #   uses: slackapi/slack-github-action@v1.26.0
       #   with:
       #     payload: |
-      #       { "text": "Preview for PR #${{ github.event.pull_request.number }}\n<${{ steps.vercel.outputs.preview-url }}|Open> | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Run>" }
+      #       { "text": "Preview for PR #${{ github.event.pull_request.number }}\n<${{ steps.vercel.outputs.preview-url }}|Open>" }
       #   env:
       #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
 
-  # -------------------------------------------------
-  # 5. NOTIFY ON ANY FAILURE
-  # -------------------------------------------------
+  # ==============================================================
+  # 5️⃣ FAILURE NOTIFICATION (optional, currently disabled)
+  # ==============================================================
   # notify-failure:
   #   needs: [ci, codeql, deploy-prod, deploy-preview]
-  #   if: failure()
+  #   if: failure()                             # 👉 Runs only if any job failed
   #   runs-on: ubuntu-latest
   #   steps:
-  #     - name: Slack – failure
+  #     - name: Slack – failure notification
   #       uses: slackapi/slack-github-action@v1.26.0
   #       with:
   #         payload: |

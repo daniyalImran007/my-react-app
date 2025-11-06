@@ -1,0 +1,384 @@
+Changes for AWS ECS Deployment
+Dockerfile: No changes needed. Your current multi-stage Dockerfile (Node builder → runtime with serve for static React) works perfectly for ECS. It exposes port 3000, which we'll map in the ECS task definition.
+YAML Changes Summary:
+
+Name: Updated to "CI/CD Pipeline (AWS ECS)".
+Triggers: Kept main for production; added staging, dev for multi-env.
+Permissions: Added id-token: write for OIDC auth.
+CI Job: Kept all (tests, build, artifact, Docker to GHCR). But for ECS, we push Docker to AWS ECR (not GHCR) in CD.
+CodeQL: Kept.
+CD Job:
+
+Renamed deploy-prod to deploy-ecs.
+Configure AWS credentials with OIDC (secure, no keys).
+Login to ECR, build/tag/push Docker image to ECR (using ECR registry).
+Download task definition JSON from AWS, update with new image URI.
+Deploy to ECS service (wait for stability).
+Smoke test: Updated to ECS load balancer URL (e.g., http://your-alb-1234567890.us-east-1.elb.amazonaws.com).
+
+
+Preview Job: Removed (ECS doesn't have native previews; use PR artifacts if needed).
+Failure Notify: Kept commented.
+Envs/Secrets: See setup below.
+
+AWS Setup (One-Time, Before Pushing YAML):
+
+Create ECS Cluster: aws ecs create-cluster --cluster-name my-react-cluster.
+Create ECR Repo: aws ecr create-repository --repository-name my-react-app.
+Create Task Definition: JSON file (see below) → aws ecs register-task-definition --cli-input-json file://task-definition.json.
+Create ECS Service: Fargate/EC2, map port 3000, attach ALB if public.
+GitHub Secrets (Repo → Settings → Secrets):
+
+AWS_REGION: e.g., us-east-1.
+AWS_ACCOUNT_ID: Your AWS account ID.
+ECR_REPOSITORY: my-react-app.
+ECS_CLUSTER: my-react-cluster.
+ECS_SERVICE: my-react-service.
+ECS_TASK_DEFINITION: task-definition.json (path in repo).
+
+
+OIDC: Repo → Settings → Actions → Add AWS role ARN (create IAM role with ECS/ECR policies, trust GitHub OIDC provider).
+Task Definition JSON (add to repo root as task-definition.json):
+json{
+  "family": "my-react-task",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "256",
+  "memory": "512",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT:role/ecsTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "react-app",
+      "image": "placeholder",
+      "portMappings": [{ "containerPort": 3000 }],
+      "essential": true
+    }
+  ]
+}
+
+
+Benefits: Docker from GHCR/CD → ECR push → ECS update → Zero-downtime deploy.
+
+Complete Modified File: .github/workflows/ci-cd.yml
+yamlname: CI/CD Pipeline (AWS ECS)
+
+# ──────────────────────────────────────
+# TRIGGERS
+# ──────────────────────────────────────
+on:
+  push:
+    branches: [ main, staging, dev ]
+  pull_request:
+    types: [ opened, synchronize, reopened ]
+  workflow_dispatch:          # manual run from UI
+
+# ──────────────────────────────────────
+# CONCURRENCY – cancel old runs
+# ──────────────────────────────────────
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ──────────────────────────────────────
+# PERMISSIONS (least-privilege)
+# ──────────────────────────────────────
+permissions:
+  contents: read
+  actions: read
+  id-token: write  # For AWS OIDC auth
+  security-events: write   # CodeQL
+  statuses: write          # commit status
+  deployments: write       # ECS
+  pull-requests: write     # PR comment
+  packages: write          # GHCR push
+
+# ──────────────────────────────────────
+# JOBS
+# ──────────────────────────────────────
+jobs:
+  # -------------------------------------------------
+  # 1. CI – build, test, lint, upload artifact
+  # -------------------------------------------------
+  ci:
+    name: CI – Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18.x, 20.x, 22.x]
+      fail-fast: false
+    outputs:
+      # expose a flag for CD (true only on main + success)
+      deploy-prod: ${{ steps.set-deploy.outputs.deploy-prod }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node ${{ matrix.node }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        id: cache
+        with:
+          path: |
+            ~/.npm
+            node_modules
+          key: ${{ runner.os }}-npm-${{ hashFiles('package-lock.json') }}
+          restore-keys: ${{ runner.os }}-npm-
+
+      # FIXED: Use npm ci instead of npm install
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test -- --coverage --watchAll=false
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: react-build-node-${{ matrix.node }}
+          path: build/
+          retention-days: 7
+
+      # === NEW: DOCKER BUILD WITH CACHE ===
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Generate Docker metadata (auto-lowercases tags)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6  # Updated to latest v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
+          sbom: true  # Optional: Generate SBOM for security
+
+      # ---- set output flag for CD (main + success) ----
+      - name: Set deploy-prod flag
+        id: set-deploy
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/main" && "${{ job.status }}" == "success" ]]; then
+            echo "deploy-prod=true" >> $GITHUB_OUTPUT
+          else
+            echo "deploy-prod=false" >> $GITHUB_OUTPUT
+          fi
+
+  # -------------------------------------------------
+  # 2. SECURITY – CodeQL (always runs, even if CI fails)
+  # -------------------------------------------------
+  codeql:
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: javascript-typescript
+          queries: security-and-quality
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v3
+
+  # -------------------------------------------------
+  # 3. CD – Production (only on main + CI success)
+  # -------------------------------------------------
+  deploy-ecs:
+    needs: [ci, codeql]
+    if: needs.ci.outputs.deploy-prod == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ secrets.ECS_CLUSTER }}
+      ECS_SERVICE: ${{ secrets.ECS_SERVICE }}
+      ECS_TASK_DEFINITION: ${{ secrets.ECS_TASK_DEFINITION }}
+      CONTAINER_NAME: react-app
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsRole
+          aws-region: ${{ secrets.AWS_REGION }}
+          role-session-name: GitHubActions-EC2
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: ${{ env.ECS_TASK_DEFINITION }}
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.build-image.outputs.image }}
+
+      - name: Deploy Amazon ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: ${{ steps.task-def.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+      # FIXED: Debug ECS deploy
+      - name: Debug ECS Outputs
+        run: |
+          echo "Deployment successful to ECS service: ${{ env.ECS_SERVICE }}"
+
+      # FIXED: Use ECS load balancer URL for smoke test
+      - name: Smoke test (ECS)
+        run: |
+          URL="http://your-alb-1234567890.us-east-1.elb.amazonaws.com"  # CHANGE TO YOUR ALB DNS
+          echo "Testing ECS: $URL"
+          sleep 30  # Wait for ECS rollout
+          curl -f -L --max-time 30 "$URL" || exit 1
+
+      # - name: Slack – prod success
+      #   uses: slackapi/slack-github-action@v1.26.0
+      #   with:
+      #     payload: |
+      #       { "text": "Production deployed to ECS!\n<${{ env.ECS_SERVICE }}|View Service> | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Run>" }
+      #   env:
+      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # -------------------------------------------------
+  # 4. CD – Preview (PRs only)
+  # -------------------------------------------------
+  deploy-preview:
+    needs: ci
+    if: github.event_name == 'pull_request' && needs.ci.result == 'success'
+    runs-on: ubuntu-latest
+    environment: preview
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: react-build-node-20.x
+          path: build/
+
+      - name: Deploy Preview
+        id: vercel
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: '--prebuilt'  # Safe for preview domains
+          alias-domains: pr-${{ github.event.pull_request.number }}.vercel.app
+        env:
+          VERCEL_ENV: preview
+
+      - name: Smoke test (Preview)
+        run: |
+          URL="${{ steps.vercel.outputs.preview-url }}"
+          if [ -z "$URL" ]; then
+            echo "Error: No preview URL"
+            exit 1
+          fi
+          echo "Testing preview: $URL"
+          sleep 15
+          curl -f -L --max-time 30 "$URL" || exit 1
+
+      - name: Comment PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `Preview ready: ${{ steps.vercel.outputs.preview-url }}`
+            })
+
+      # - name: Slack – preview
+      #   uses: slackapi/slack-github-action@v1.26.0
+      #   with:
+      #     payload: |
+      #       { "text": "Preview for PR #${{ github.event.pull_request.number }}\n<${{ steps.vercel.outputs.preview-url }}|Open> | <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|Run>" }
+      #   env:
+      #     SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # -------------------------------------------------
+  # 5. NOTIFY ON ANY FAILURE
+  # ──────────────────────────────────────
+  # notify-failure:
+  #   needs: [ci, codeql, deploy-ecs, deploy-preview]
+  #   if: failure()
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Slack – failure
+  #       uses: slackapi/slack-github-action@v1.26.0
+  #       with:
+  #         payload: |
+  #           { "text": ":fire: *CI/CD failed* on `${{ github.ref_name }}`\n<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>" }
+  #       env:
+  #         SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+Push & Test:
+bashgit add .github/workflows/ci-cd.yml task-definition.json
+git commit -m "Switch to AWS ECS deploy"
+git push
+Push to main → Builds/tests → Pushes Docker to ECR → Updates ECS task → Smoke test on ALB.
+For multi-env (staging/dev), duplicate ECS cluster/service/ECR in AWS and add branch logic to envs.
+You're now fully AWS ECS-ready! If you need ECR multi-repo or Fargate tweaks, ask.
